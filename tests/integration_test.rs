@@ -210,7 +210,11 @@ fn resolves_real_bioconda_fgbio_shim() {
 
     if have_java() {
         let run = Command::new(&out).output().unwrap();
-        assert!(run.status.success(), "re-wrapped fgbio shim should run");
+        assert!(
+            run.status.success(),
+            "re-wrapped fgbio shim should run; stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "Hello, World!");
     }
 }
@@ -230,7 +234,11 @@ fn magicked_jar_runs_and_is_still_a_jar() {
 
     // The output runs directly as a program...
     let direct = Command::new(&out).output().unwrap();
-    assert!(direct.status.success());
+    assert!(
+        direct.status.success(),
+        "the magicked file should run directly; stderr: {}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&direct.stdout).trim(),
         "Hello, World!"
@@ -238,7 +246,11 @@ fn magicked_jar_runs_and_is_still_a_jar() {
 
     // ...and still works as a jar (the prepended bytes do not break `java -jar`).
     let as_jar = Command::new("java").arg("-jar").arg(&out).output().unwrap();
-    assert!(as_jar.status.success());
+    assert!(
+        as_jar.status.success(),
+        "the magicked file should still be a valid jar; stderr: {}",
+        String::from_utf8_lossy(&as_jar.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&as_jar.stdout).trim(),
         "Hello, World!"
