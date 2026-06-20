@@ -19,23 +19,17 @@ const STYLES: Styles = Styles::styled()
 #[derive(Debug, Parser)]
 #[command(name = "magicjar", version, about, long_about = None, styles = STYLES, term_width = 80)]
 struct Cli {
-    /// The .jar, symlink, wrapper script, or shell alias to make executable.
+    /// The JAR, symlink, wrapper script, or shell alias to make executable.
     input: String,
 
-    /// Output file name [default: the input basename without its .jar suffix].
+    /// Output file name [default: input basename without .jar suffix].
     output: Option<String>,
 
-    /// Overwrite the output file if it already exists.
-    #[arg(short, long)]
-    force: bool,
-
-    /// Do not set MALLOC_ARENA_MAX in the generated preamble (the glibc
-    /// arena-limiting hack is included by default).
+    /// Do not set MALLOC_ARENA_MAX limits in the generated preamble.
     #[arg(long)]
     no_malloc_arena_max: bool,
 
-    /// JVM options applied only when the caller sets no heap preference of their
-    /// own. Pass "" to apply none.
+    /// JVM options applied to the wrapper script. Pass "" to clear.
     #[arg(
         long,
         default_value = "-Xms512m -XX:+AggressiveHeap",
@@ -43,6 +37,10 @@ struct Cli {
         allow_hyphen_values = true
     )]
     default_jvm_opts: String,
+
+    /// Overwrite the output file if it already exists.
+    #[arg(short, long)]
+    force: bool,
 }
 
 fn main() -> ExitCode {
