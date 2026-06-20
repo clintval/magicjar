@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
 
-Make a Java JAR self-executing by prepending a shell preamble.
+Make a Java JAR self-executing.
 
 ![magicjar](.github/img/cover.jpg)
 
@@ -21,31 +21,28 @@ pixi exec \
 
 ## Introduction
 
-`magicjar` turns a Java `.jar` into a single self-executing file.
-A JAR is a ZIP archive, and the JVM reads a ZIP's directory from the *end* of the file, so any bytes prepended to the front are ignored by `java -jar`.
-`magicjar` exploits this by prepending a small shell preamble that re-launches the JVM on the file itself: the result runs as `./fgbio` and still works as `java -jar fgbio`.
+The command `magicjar` turns a Java JAR into a single self-executing file.
 
-The input can be a `.jar`, a symlink to one, a conda/bioconda wrapper script, or a shell alias; `magicjar` resolves any of these down to the underlying archive.
-Pointed at the wrapper-script-plus-jar layout that conda ships (two files), it re-wraps them into one portable executable.
+The input can be a JAR, a symlink to one, a wrapper script, or a shell alias.
+The command `magicjar` resolves any of these down to the underlying JAR file.
 
 ## Quick Start
 
-Wrap a jar, then run it directly:
+Make a JAR self-executing, then test it out:
 
 ```bash
 ❯ magicjar fgbio.jar fgbio
-wrote fgbio (executable)
 
 ❯ ./fgbio --version
 ```
 
-Omit the output name and it defaults to the input without the `.jar` suffix:
+Omit the output name and it defaults to the input without the JAR suffix:
 
 ```bash
-❯ magicjar fgbio.jar      # writes ./fgbio
+❯ magicjar fgbio.jar
 ```
 
-Re-wrap a conda-installed tool into a single portable file:
+Re-wrap a conda-installed tool into a single executable and portable file:
 
 ```bash
 ❯ magicjar "$(pixi exec -s fgbio which fgbio)" fgbio
@@ -56,13 +53,6 @@ JVM flags pass straight through to the JVM; everything else goes to the program:
 ```bash
 ❯ ./fgbio -Xmx8g -XX:+UseZGC -Dconfig=prod CallMolecularConsensusReads -i in.bam
 ```
-
-## Features
-
-- Prepends a portable shell preamble and marks the result executable in one step.
-- Resolves a `.jar`, a symlink, a conda/bioconda wrapper script, or a shell alias to the underlying archive.
-- Routes any `-D`/`-X`/`-XX` flag to the JVM and passes the rest through to the program.
-- Refuses to overwrite an existing file unless `--force` is given.
 
 ## Development and Testing
 

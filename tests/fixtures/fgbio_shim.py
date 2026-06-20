@@ -10,7 +10,7 @@ import os
 from os import access, getenv, path, X_OK
 
 
-# Expected name of the VarScan JAR file.
+# Expected name of the test JAR file.
 JAR_NAME = 'fgbio.jar'
 PKG_NAME = 'fgbio'
 

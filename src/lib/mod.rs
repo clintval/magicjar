@@ -17,12 +17,109 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-/// The shell preamble prepended to the jar.
+/// The preamble template, with `@DEFAULT_MEM_OPTS@` and `@MALLOC_BLOCK@`
+/// placeholders that [`build_preamble`] fills in. Kept as inline text so the
+/// binary is fully self-contained.
+const PREAMBLE_TEMPLATE: &str = r#"#!/usr/bin/env bash
+# magicjar:self-executing-jar (https://github.com/clintval/magicjar)
+set -e
+
+# Sort caller arguments into JVM options vs program arguments. Anything that
+# looks like a JVM flag (a -D system property, or any -X / -XX non-standard or
+# advanced option: -Xmx4g, -Xss8m, -Xint, -XX:+UseZGC, ...) goes to the JVM;
+# everything else passes through to the program. General purpose: callers tune
+# the JVM and drive the app from one CLI.
+JVM_OPTS=()
+PASS_ARGS=()
+USER_SET_MEM=0
+DEFAULT_MEM_OPTS=(@DEFAULT_MEM_OPTS@)
+
+for ARG in "$@"; do
+  case $ARG in
+    -D* | -X*)
+      JVM_OPTS+=("$ARG")
+      case $ARG in
+        -Xms* | -Xmx* | -Xmn* | -XX:+AggressiveHeap) USER_SET_MEM=1;;
+      esac
+      ;;
+    *)
+      PASS_ARGS+=("$ARG");;
+  esac
+done
+
+# Apply the default memory options only when the caller expressed no heap
+# preference of their own (via _JAVA_OPTIONS, JAVA_OPTS, or a -Xms/-Xmx/-Xmn/
+# -XX:+AggressiveHeap flag above).
+if [ -z "${_JAVA_OPTIONS}" ] && [ -z "${JAVA_OPTS}" ] && [ "$USER_SET_MEM" -eq 0 ]; then
+  JVM_OPTS=("${DEFAULT_MEM_OPTS[@]}" "${JVM_OPTS[@]}")
+fi
+
+@MALLOC_BLOCK@
+exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0" "${PASS_ARGS[@]}"
+exit
+"#;
+
+/// Marker embedded in every generated preamble. Used to detect, and refuse, a
+/// file that magicjar has already wrapped.
+const MAGICJAR_MARKER: &str = "magicjar:self-executing-jar";
+
+/// The glibc arena-limiting block, included unless disabled. Constrains
+/// `MALLOC_ARENA_MAX` so the JVM's virtual memory does not balloon with CPU count.
+const MALLOC_BLOCK: &str = r#"# If not already set to some value, set MALLOC_ARENA_MAX to constrain the number of memory pools (arenas) used
+# by glibc to a reasonable number. The default behaviour is to scale with the number of CPUs, which can cause
+# VIRTUAL memory usage to be ~0.5GB per cpu core in the system, e.g. 32GB of a 64-core machine even when the
+# heap and resident memory are only 1-4GB! See the following link for more discussion:
+# https://www.ibm.com/developerworks/community/blogs/kevgrig/entry/linux_glibc_2_10_rhel_6_malloc_may_show_excessive_virtual_memory_usage?lang=en
+if [ -z "${MALLOC_ARENA_MAX}" ]; then export MALLOC_ARENA_MAX=4; fi"#;
+
+/// The opinionated runtime defaults baked into the generated preamble.
+///
+/// All are enabled by default. The CLI can turn the malloc block off and clear
+/// or customize the heap options.
+#[derive(Debug, Clone)]
+pub struct PreambleOptions {
+    /// Include the `MALLOC_ARENA_MAX` glibc arena-limiting block.
+    pub malloc_arena_max: bool,
+    /// JVM options applied only when the caller sets no heap preference; empty
+    /// means none. Default: `-Xms512m -XX:+AggressiveHeap`.
+    pub default_jvm_opts: String,
+}
+
+impl Default for PreambleOptions {
+    fn default() -> Self {
+        Self {
+            malloc_arena_max: true,
+            default_jvm_opts: "-Xms512m -XX:+AggressiveHeap".to_string(),
+        }
+    }
+}
+
+/// Build the shell preamble for the given options.
 ///
 /// A JAR is a ZIP archive whose central directory is read from the *end* of the
 /// file, so these leading bytes are ignored by `java -jar` while `./file` runs
 /// this script (which re-execs the JVM on itself).
-pub const PREAMBLE: &str = include_str!("../preamble.sh");
+pub fn build_preamble(options: &PreambleOptions) -> Result<String> {
+    let mem_opts = if options.default_jvm_opts.trim().is_empty() {
+        String::new()
+    } else {
+        let tokens = shell_words::split(&options.default_jvm_opts)
+            .with_context(|| format!("invalid --default-jvm-opts: {}", options.default_jvm_opts))?;
+        tokens
+            .iter()
+            .map(|token| shell_words::quote(token).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let malloc = if options.malloc_arena_max {
+        MALLOC_BLOCK
+    } else {
+        ""
+    };
+    Ok(PREAMBLE_TEMPLATE
+        .replace("@DEFAULT_MEM_OPTS@", &mem_opts)
+        .replace("@MALLOC_BLOCK@", malloc))
+}
 
 /// The result of a successful [`run`].
 #[derive(Debug, Clone)]
@@ -33,13 +130,18 @@ pub struct Outcome {
     pub source: PathBuf,
 }
 
-/// Resolve `input`, prepend [`PREAMBLE`] to its jar, and write an executable
-/// `output`.
+/// Resolve `input`, prepend the preamble (see [`build_preamble`]) to its jar,
+/// and write an executable `output`.
 ///
 /// When `output` is `None` it defaults to the input's basename with a trailing
 /// (case-insensitive) `.jar` removed. An existing output is not overwritten
 /// unless `force` is set.
-pub fn run(input: &str, output: Option<&str>, force: bool) -> Result<Outcome> {
+pub fn run(
+    input: &str,
+    output: Option<&str>,
+    force: bool,
+    options: &PreambleOptions,
+) -> Result<Outcome> {
     let source = resolve_source(input)?;
     validate_source(&source)?;
 
@@ -48,7 +150,8 @@ pub fn run(input: &str, output: Option<&str>, force: bool) -> Result<Outcome> {
         None => PathBuf::from(default_output_name(input)),
     };
 
-    write_executable(PREAMBLE, &source, &output, force)?;
+    let preamble = build_preamble(options)?;
+    write_executable(&preamble, &source, &output, force)?;
     Ok(Outcome { output, source })
 }
 
@@ -62,6 +165,12 @@ pub fn resolve_source(input: &str) -> Result<PathBuf> {
     if path.exists() {
         let real =
             std::fs::canonicalize(path).with_context(|| format!("cannot resolve path: {input}"))?;
+        if is_already_magicked(&real) {
+            bail!(
+                "{} is already a magicjar self-executing file; pass the original .jar instead",
+                real.display()
+            );
+        }
         if looks_like_jar(&real) {
             return Ok(real);
         }
@@ -141,6 +250,30 @@ fn read_text_head(path: &Path, max: usize) -> Option<String> {
         return None;
     }
     String::from_utf8(buf).ok()
+}
+
+/// Whether a file already carries the magicjar marker in its head, i.e. has
+/// already been wrapped. Reads raw bytes, so it works even though the trailing
+/// jar data is binary.
+fn is_already_magicked(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 2048];
+    let Ok(read) = file.read(&mut buf) else {
+        return false;
+    };
+    contains_subslice(&buf[..read], MAGICJAR_MARKER.as_bytes())
+}
+
+/// Whether `haystack` contains `needle` as a contiguous subslice.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// Write `preamble` followed by the bytes of `source` to `output`, then mark it
@@ -649,6 +782,55 @@ mod tests {
             "/envs/x/bin/../share/a.jar"
         );
         assert_eq!(expand("${0%/*}/a.jar", base, None), "/envs/x/bin/a.jar");
+    }
+
+    #[test]
+    fn build_preamble_defaults_include_all_three() {
+        let preamble = build_preamble(&PreambleOptions::default()).unwrap();
+        assert!(preamble.contains("-Xms512m"));
+        assert!(preamble.contains("export MALLOC_ARENA_MAX=4"));
+        assert!(preamble.contains(MAGICJAR_MARKER));
+        assert!(!preamble.contains("@DEFAULT_MEM_OPTS@"));
+        assert!(!preamble.contains("@MALLOC_BLOCK@"));
+    }
+
+    #[test]
+    fn build_preamble_can_disable_malloc_and_heap() {
+        let preamble = build_preamble(&PreambleOptions {
+            malloc_arena_max: false,
+            default_jvm_opts: String::new(),
+        })
+        .unwrap();
+        assert!(!preamble.contains("MALLOC_ARENA_MAX"));
+        assert!(!preamble.contains("-Xms512m"));
+        assert!(preamble.contains("DEFAULT_MEM_OPTS=()"));
+        // The marker is always present, regardless of options.
+        assert!(preamble.contains(MAGICJAR_MARKER));
+    }
+
+    #[test]
+    fn build_preamble_can_customize_heap() {
+        let preamble = build_preamble(&PreambleOptions {
+            malloc_arena_max: true,
+            default_jvm_opts: "-Xms1g -XX:+UseZGC".to_string(),
+        })
+        .unwrap();
+        assert!(preamble.contains("-Xms1g"));
+        assert!(preamble.contains("-XX:+UseZGC"));
+        assert!(!preamble.contains("-Xms512m"));
+    }
+
+    #[test]
+    fn detects_already_magicked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapped = dir.path().join("wrapped");
+        let preamble = build_preamble(&PreambleOptions::default()).unwrap();
+        std::fs::write(&wrapped, format!("{preamble}PK\x03\x04 jar bytes")).unwrap();
+        assert!(is_already_magicked(&wrapped));
+
+        let plain = dir.path().join("plain.jar");
+        std::fs::write(&plain, b"PK\x03\x04 not wrapped").unwrap();
+        assert!(!is_already_magicked(&plain));
     }
 
     #[test]

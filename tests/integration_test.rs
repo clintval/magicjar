@@ -36,11 +36,15 @@ fn have_java() -> bool {
         .unwrap_or(false)
 }
 
-/// Assert that `output` is exactly `PREAMBLE` followed by the bytes of `jar`.
-fn assert_magicjar_layout(output: &Path, jar: &Path) {
+fn default_preamble() -> String {
+    magicjarlib::build_preamble(&magicjarlib::PreambleOptions::default()).unwrap()
+}
+
+/// Assert that `output` is exactly `preamble` followed by the bytes of `jar`.
+fn assert_layout(output: &Path, jar: &Path, preamble: &str) {
     let out = fs::read(output).unwrap();
     let jar = fs::read(jar).unwrap();
-    let preamble = magicjarlib::PREAMBLE.as_bytes();
+    let preamble = preamble.as_bytes();
     assert!(
         out.starts_with(preamble),
         "output should begin with the shell preamble"
@@ -55,6 +59,11 @@ fn assert_magicjar_layout(output: &Path, jar: &Path) {
         &jar[..],
         "the appended bytes should be the original jar, untouched"
     );
+}
+
+/// Assert the output is the default preamble followed by the jar.
+fn assert_magicjar_layout(output: &Path, jar: &Path) {
+    assert_layout(output, jar, &default_preamble());
 }
 
 #[cfg(unix)]
@@ -366,4 +375,119 @@ fn resolves_shell_wrapper_using_prefix_variable() {
         .assert()
         .success();
     assert_magicjar_layout(&out, &jar);
+}
+
+#[test]
+fn no_malloc_arena_max_flag_omits_the_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("app");
+
+    magicjar()
+        .arg(&jar)
+        .arg(&out)
+        .arg("--no-malloc-arena-max")
+        .assert()
+        .success();
+
+    let preamble = magicjarlib::build_preamble(&magicjarlib::PreambleOptions {
+        malloc_arena_max: false,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        !preamble.contains("MALLOC_ARENA_MAX"),
+        "malloc block should be omitted"
+    );
+    assert_layout(&out, &jar, &preamble);
+}
+
+#[test]
+fn default_jvm_opts_empty_omits_heap_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("app");
+
+    magicjar()
+        .arg(&jar)
+        .arg(&out)
+        .arg("--default-jvm-opts")
+        .arg("")
+        .assert()
+        .success();
+
+    let preamble = magicjarlib::build_preamble(&magicjarlib::PreambleOptions {
+        default_jvm_opts: String::new(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        !preamble.contains("-Xms512m"),
+        "default heap opts should be omitted"
+    );
+    assert!(
+        preamble.contains("DEFAULT_MEM_OPTS=()"),
+        "expected an empty default mem opts array"
+    );
+    assert_layout(&out, &jar, &preamble);
+}
+
+#[test]
+fn errors_on_double_wrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let once = dir.path().join("once");
+    magicjar().arg(&jar).arg(&once).assert().success();
+
+    // Running magicjar on an already-wrapped file must error, not double-wrap.
+    let twice = dir.path().join("twice");
+    magicjar()
+        .arg(&once)
+        .arg(&twice)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already a magicjar"));
+    assert!(
+        !twice.exists(),
+        "no output should be written on a double-wrap attempt"
+    );
+}
+
+#[test]
+fn custom_default_jvm_opts_with_hyphen_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("app");
+
+    // The value begins with '-'; clap must accept it (allow_hyphen_values).
+    // Use portable heap flags so the produced file runs on any JVM >= 8.
+    magicjar()
+        .arg(&jar)
+        .arg(&out)
+        .arg("--default-jvm-opts")
+        .arg("-Xms64m -Xmx128m")
+        .assert()
+        .success();
+
+    let preamble = magicjarlib::build_preamble(&magicjarlib::PreambleOptions {
+        default_jvm_opts: "-Xms64m -Xmx128m".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(preamble.contains("-Xms64m") && preamble.contains("-Xmx128m"));
+    assert_layout(&out, &jar, &preamble);
+
+    if have_java() {
+        let run = Command::new(&out).output().unwrap();
+        assert!(
+            run.status.success(),
+            "custom-heap file should run; stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "Hello, World!");
+    }
 }
