@@ -886,4 +886,246 @@ mod tests {
         std::fs::write(&txt, b"not a zip").unwrap();
         assert!(!looks_like_jar(&txt));
     }
+
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-wide environment variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Write a minimal file that satisfies the ZIP-magic jar check.
+    fn write_fake_jar(path: &Path) {
+        std::fs::write(path, b"PK\x03\x04 fake jar bytes").unwrap();
+    }
+
+    #[test]
+    fn looks_like_jar_false_for_short_or_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tiny = dir.path().join("tiny"); // no .jar suffix, fewer than 4 bytes
+        std::fs::write(&tiny, b"hi").unwrap();
+        assert!(!looks_like_jar(&tiny)); // read_exact fails -> false
+        assert!(!looks_like_jar(Path::new("/no/such/file"))); // open fails -> false
+    }
+
+    #[test]
+    fn validate_source_covers_every_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_source(&dir.path().join("nope.jar")).is_err()); // missing
+        assert!(validate_source(dir.path()).is_err()); // not a regular file
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"plain text, definitely not a zip archive").unwrap();
+        assert!(validate_source(&txt).is_err()); // not jar-like
+        let jar = dir.path().join("ok.jar");
+        write_fake_jar(&jar);
+        assert!(validate_source(&jar).is_ok()); // valid
+    }
+
+    #[test]
+    fn is_already_magicked_false_on_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_already_magicked(&dir.path().join("missing"))); // open fails
+        assert!(!is_already_magicked(dir.path())); // read of a directory fails
+    }
+
+    #[test]
+    fn contains_subslice_empty_needle_is_true() {
+        assert!(contains_subslice(b"anything", b""));
+        assert!(!contains_subslice(b"abc", b"xyz"));
+    }
+
+    #[test]
+    fn same_file_false_when_a_path_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, b"x").unwrap();
+        assert!(!same_file(&real, &dir.path().join("ghost")));
+    }
+
+    #[test]
+    fn strip_outer_quotes_passthrough_without_a_matching_pair() {
+        assert_eq!(strip_outer_quotes("bare"), "bare");
+        assert_eq!(strip_outer_quotes("'quoted'"), "quoted");
+        assert_eq!(strip_outer_quotes("\"mismatch'"), "\"mismatch'");
+    }
+
+    #[test]
+    fn run_writes_executable_with_explicit_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("tool.jar");
+        write_fake_jar(&jar);
+        let out = dir.path().join("tool.out");
+        let outcome = run(
+            jar.to_str().unwrap(),
+            Some(out.to_str().unwrap()),
+            false,
+            &PreambleOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.output, out);
+        assert_eq!(outcome.source, std::fs::canonicalize(&jar).unwrap());
+        assert!(out.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn run_refuses_a_directory_as_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("tool.jar");
+        write_fake_jar(&jar);
+        let subdir = dir.path().join("outdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let err = run(
+            jar.to_str().unwrap(),
+            Some(subdir.to_str().unwrap()),
+            true,
+            &PreambleOptions::default(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is a directory"));
+    }
+
+    #[test]
+    fn build_preamble_rejects_malformed_jvm_opts() {
+        let err = build_preamble(&PreambleOptions {
+            malloc_arena_max: true,
+            default_jvm_opts: "\"unterminated".to_string(),
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid --default-jvm-opts"));
+    }
+
+    #[test]
+    fn resolve_source_text_wrapper_without_a_jar_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("toolwrap");
+        std::fs::write(&wrapper, "#!/bin/sh\necho 'this wrapper launches nothing'\n").unwrap();
+        let err = resolve_source(wrapper.to_str().unwrap()).unwrap_err();
+        assert!(format!("{err:#}").contains("could not find the .jar"));
+    }
+
+    #[test]
+    fn resolve_jar_from_text_tier3_direct_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("plain.jar");
+        write_fake_jar(&jar);
+        // No `-jar` flag and no JAR_NAME assignment, so tier 3 resolves the bare path.
+        let text = format!("# launches {}\n", jar.display());
+        let resolved = resolve_jar_from_text(&text, dir.path(), None).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&jar).unwrap());
+    }
+
+    #[test]
+    fn resolve_jar_from_text_tier3_prefix_search_by_basename() {
+        let prefix = tempfile::tempdir().unwrap();
+        let opt = prefix.path().join("opt");
+        std::fs::create_dir_all(&opt).unwrap();
+        let jar = opt.join("hidden.jar");
+        write_fake_jar(&jar);
+        // Referenced only by basename; the direct path does not exist, so the
+        // function falls back to searching the prefix.
+        let base = prefix.path().join("bin");
+        let resolved =
+            resolve_jar_from_text("launch hidden.jar now\n", &base, Some(prefix.path())).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&jar).unwrap());
+    }
+
+    #[test]
+    fn resolve_jar_from_text_bails_when_nothing_resolves() {
+        let prefix = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(prefix.path().join("lib").join("nested")).unwrap();
+        let base = prefix.path().join("bin");
+        let err =
+            resolve_jar_from_text("needs ghost.jar\n", &base, Some(prefix.path())).unwrap_err();
+        assert!(format!("{err:#}").contains("no resolvable .jar"));
+    }
+
+    #[test]
+    fn resolve_jar_from_text_skips_unparseable_jar_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("real.jar");
+        write_fake_jar(&jar);
+        // First line has `-jar` but an unbalanced quote (shell-words can't split
+        // it); the resolver must skip it and find the jar on the next line.
+        let text = format!("java -jar \"unterminated\nexec java -jar {}\n", jar.display());
+        let resolved = resolve_jar_from_text(&text, dir.path(), None).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&jar).unwrap());
+    }
+
+    #[test]
+    fn walk_find_returns_none_at_zero_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(walk_find(dir.path(), "anything.jar", 0).is_none());
+    }
+
+    #[test]
+    fn expand_env_handles_invalid_and_bare_dollars() {
+        // `${...}` with an invalid identifier is left intact.
+        assert_eq!(expand_env("${1bad}/x.jar"), "${1bad}/x.jar");
+        // `${` with no closing brace is left intact.
+        assert_eq!(expand_env("${unclosed"), "${unclosed");
+        // A bare `$` before a non-identifier character is kept verbatim.
+        assert_eq!(expand_env("cost is $/5"), "cost is $/5");
+        assert_eq!(expand_env("trailing $"), "trailing $");
+    }
+
+    #[test]
+    fn assignment_value_rejects_near_misses() {
+        assert_eq!(assignment_value("JAR_NAMESPACE = 'x'\n", "JAR_NAME"), None);
+        assert_eq!(assignment_value("JAR_NAME something\n", "JAR_NAME"), None);
+        assert_eq!(assignment_value("JAR_NAME = ''\n", "JAR_NAME"), None);
+    }
+
+    #[test]
+    fn collect_jar_candidates_skips_lookalikes_and_dedupes() {
+        assert_eq!(
+            collect_jar_candidates("see config.jarx and app.jar plus app.jar"),
+            vec!["app.jar"]
+        );
+    }
+
+    #[test]
+    fn resolve_alias_errors_for_an_unresolvable_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Point $SHELL at a non-executable file: depending on the platform the
+        // shell either fails to spawn or runs and reports no such alias. Either
+        // way the lookup must fail and resolve no jar.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_shell = dir.path().join("not-a-shell");
+        std::fs::write(&fake_shell, b"not executable").unwrap();
+        let saved = std::env::var_os("SHELL");
+        unsafe {
+            std::env::set_var("SHELL", &fake_shell);
+        }
+        let result = resolve_source("some-unlikely-alias-name-xyz");
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("SHELL", value),
+                None => std::env::remove_var("SHELL"),
+            }
+        }
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expand_tilde_uses_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
+        let expanded = expand("~/tools/app.jar", Path::new("/base"), None);
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(expanded, "/home/testuser/tools/app.jar");
+    }
 }
