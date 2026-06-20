@@ -1,0 +1,39 @@
+[package]
+name = "magicjar"
+version = "0.1.0"
+authors = ["Clint Valentine <valentine.clint@gmail.com>"]
+edition = "2024"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/clintval/magicjar"
+description = "Make a Java JAR self-executing by prepending a shell preamble."
+documentation = "https://github.com/clintval/magicjar/README.md"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["java", "jar", "executable", "self-executing", "wrapper"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+
+[lib]
+name = "magicjarlib"
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "magicjar"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+shell-words = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+pretty_assertions = "1"
+rstest = "0.26"
+tempfile = "3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }

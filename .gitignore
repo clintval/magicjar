@@ -1,0 +1,10 @@
+/target/
+
+**/*.rs.bk
+
+*.iml
+.idea/
+.vscode/
+.DS_Store
+.claude/
+.worktrees/
