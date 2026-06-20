@@ -642,6 +642,16 @@ mod tests {
     }
 
     #[test]
+    fn expand_substitutes_script_dir() {
+        let base = Path::new("/envs/x/bin");
+        assert_eq!(
+            expand("$(dirname \"$0\")/../share/a.jar", base, None),
+            "/envs/x/bin/../share/a.jar"
+        );
+        assert_eq!(expand("${0%/*}/a.jar", base, None), "/envs/x/bin/a.jar");
+    }
+
+    #[test]
     fn resolve_jar_via_explicit_jar_flag() {
         let dir = tempfile::tempdir().unwrap();
         let jar = dir.path().join("app.jar");

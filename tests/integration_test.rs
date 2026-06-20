@@ -20,6 +20,10 @@ fn hello_jar() -> PathBuf {
     fixtures().join("hello.jar")
 }
 
+fn echo_jar() -> PathBuf {
+    fixtures().join("echo.jar")
+}
+
 fn magicjar() -> AssertCommand {
     AssertCommand::cargo_bin("magicjar").unwrap()
 }
@@ -292,4 +296,74 @@ fn errors_on_unknown_alias() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("no file or shell alias"));
+}
+
+#[test]
+fn routes_jvm_flags_and_passes_program_args() {
+    if !have_java() {
+        eprintln!("skipping: no `java` on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("echo.jar");
+    fs::copy(echo_jar(), &jar).unwrap();
+    let out = dir.path().join("echo");
+
+    magicjar().arg(&jar).arg(&out).assert().success();
+
+    // echo.jar prints "prop=<-Dmagicjar.test>" and "args=<program args>".
+    // The preamble must route -D to the JVM (so the property is set) and -Xss/
+    // -Xint to the JVM (so they do NOT leak into the program's argv).
+    let run = Command::new(&out)
+        .args(["-Dmagicjar.test=hi", "-Xss4m", "-Xint", "alpha", "beta"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success(),
+        "magicked echo should run; stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        stdout.contains("prop=hi"),
+        "-D must reach the JVM; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("args=alpha,beta"),
+        "-Xss/-Xint must go to the JVM, not the program; got: {stdout}"
+    );
+}
+
+#[test]
+fn resolves_shell_wrapper_using_prefix_variable() {
+    // A non-Python (shell) wrapper that references the jar via $PREFIX, the way
+    // many conda shell shims do. Layout: <prefix>/bin/toolwrap + <prefix>/lib/tool.jar.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let lib = dir.path().join("lib");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&lib).unwrap();
+
+    let jar = lib.join("tool.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+
+    let wrapper = bin.join("toolwrap");
+    fs::write(
+        &wrapper,
+        "#!/usr/bin/env bash\nexec java -jar \"$PREFIX/lib/tool.jar\" \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    make_executable(&wrapper);
+
+    let out = dir.path().join("toolwrap.exe");
+    magicjar()
+        // Force the inferred-prefix path (don't let an ambient $PREFIX interfere).
+        .env_remove("PREFIX")
+        .env_remove("CONDA_PREFIX")
+        .arg(&wrapper)
+        .arg(&out)
+        .assert()
+        .success();
+    assert_magicjar_layout(&out, &jar);
 }
