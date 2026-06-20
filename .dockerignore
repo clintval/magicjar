@@ -1,0 +1,7 @@
+# Keep the Docker build context to just the crate sources. Everything the build
+# needs (Cargo.toml, Cargo.lock, src/) is small; the rest only bloats the context.
+/target
+/.git
+/.github
+/tests
+*.gif
