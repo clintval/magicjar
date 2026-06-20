@@ -51,7 +51,24 @@ Re-wrap a conda-installed tool into a single executable and portable file:
 JVM flags pass straight through to the JVM; everything else goes to the program:
 
 ```bash
-❯ ./fgbio -Xmx8g -XX:+UseZGC -Dconfig=prod CallMolecularConsensusReads -i in.bam
+❯ ./fgbio -Xmx8g -XX:+UseZGC -Dconfig=prod CallMolecularConsensusReads -i "in.bam"
+```
+
+## Use in a Dockerfile
+
+Copy the binary out of the published image:
+
+```dockerfile
+COPY --from=ghcr.io/clintval/magicjar:0.1.0 /magicjar /usr/local/bin/magicjar
+```
+
+Or fetch the binary straight from the GitHub Release (swap the target for
+`aarch64-unknown-linux-musl` on ARM):
+
+```dockerfile
+ADD --chmod=755 \
+    https://github.com/clintval/magicjar/releases/download/0.1.0/magicjar-x86_64-unknown-linux-musl \
+    /usr/local/bin/magicjar
 ```
 
 ## Development and Testing

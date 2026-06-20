@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach assets to"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build static binary
+        run: cross build --release --locked --target ${{ matrix.target }}
+      - name: Stage binary
+        run: install -m 0755 "target/${{ matrix.target }}/release/magicjar" "magicjar-${{ matrix.target }}"
+      - name: Attach binary to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "magicjar-${{ matrix.target }}" --clobber --repo "$GITHUB_REPOSITORY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: magicjar-${{ matrix.target }}
+          path: magicjar-${{ matrix.target }}
+          if-no-files-found: error
+
+  image:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Assemble image context
+        run: |
+          mkdir -p image
+          cp docker/Dockerfile image/Dockerfile
+          install -m 0755 dist/magicjar-x86_64-unknown-linux-musl image/magicjar-amd64
+          install -m 0755 dist/magicjar-aarch64-unknown-linux-musl image/magicjar-arm64
+      - name: Resolve version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: image
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/clintval/magicjar:${{ steps.version.outputs.tag }}
+            ghcr.io/clintval/magicjar:latest
