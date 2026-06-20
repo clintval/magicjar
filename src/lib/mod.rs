@@ -1004,7 +1004,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let wrapper = bin.join("toolwrap");
-        std::fs::write(&wrapper, "#!/bin/sh\necho 'this wrapper launches nothing'\n").unwrap();
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\necho 'this wrapper launches nothing'\n",
+        )
+        .unwrap();
         let err = resolve_source(wrapper.to_str().unwrap()).unwrap_err();
         assert!(format!("{err:#}").contains("could not find the .jar"));
     }
@@ -1052,7 +1056,10 @@ mod tests {
         write_fake_jar(&jar);
         // First line has `-jar` but an unbalanced quote (shell-words can't split
         // it); the resolver must skip it and find the jar on the next line.
-        let text = format!("java -jar \"unterminated\nexec java -jar {}\n", jar.display());
+        let text = format!(
+            "java -jar \"unterminated\nexec java -jar {}\n",
+            jar.display()
+        );
         let resolved = resolve_jar_from_text(&text, dir.path(), None).unwrap();
         assert_eq!(resolved, std::fs::canonicalize(&jar).unwrap());
     }
