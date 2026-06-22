@@ -22,7 +22,6 @@ pixi exec \
 ## Introduction
 
 The command `magicjar` turns a Java JAR into a single self-executing file.
-
 The input can be a JAR, a symlink to one, a wrapper script, or a shell alias.
 The command `magicjar` resolves any of these down to the underlying JAR file.
 
