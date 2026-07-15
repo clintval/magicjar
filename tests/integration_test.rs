@@ -593,3 +593,96 @@ fn custom_default_jvm_opts_with_hyphen_value() {
         assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "Hello, World!");
     }
 }
+
+/// Write a fake `java` at `path` that records `tag` into `marker` when invoked.
+/// Used to observe which JVM the preamble actually launches, without a real JVM.
+#[cfg(unix)]
+fn write_recording_java(path: &Path, tag: &str, marker: &Path) {
+    fs::write(
+        path,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s' {} > {}\n",
+            shell_quote(tag),
+            shell_quote(marker.to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    make_executable(path);
+}
+
+#[test]
+#[cfg(unix)]
+fn magicjar_java_env_overrides_path_java() {
+    // $MAGICJAR_JAVA selects the JVM the preamble launches, taking precedence
+    // over `java` on PATH. This covers the bare-name launch path, the way a
+    // workflow engine stages and runs e.g. ./gatk3-3.8-1.
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("mytool"); // bare name
+    magicjar().arg(&jar).arg(&out).assert().success();
+
+    let which = dir.path().join("which-java.txt");
+    let pathbin = dir.path().join("pathbin");
+    fs::create_dir_all(&pathbin).unwrap();
+    write_recording_java(&pathbin.join("java"), "path", &which);
+    let override_dir = dir.path().join("jvm8");
+    fs::create_dir_all(&override_dir).unwrap();
+    let override_java = override_dir.join("java");
+    write_recording_java(&override_java, "override", &which);
+
+    let path = format!(
+        "{}:{}",
+        pathbin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new(&out)
+        .env("PATH", &path)
+        .env("MAGICJAR_JAVA", &override_java)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the magicked file should run");
+    assert_eq!(
+        fs::read_to_string(&which).unwrap().trim(),
+        "override",
+        "the JVM named by $MAGICJAR_JAVA must run, not `java` on PATH"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn magicjar_java_env_honored_on_dot_jar_fast_path() {
+    // A magicked file whose own name ends in .jar takes the fast path
+    // (exec ... -jar "$0"); it must honor $MAGICJAR_JAVA too.
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("mytool.jar"); // .jar name -> fast path
+    magicjar().arg(&jar).arg(&out).assert().success();
+
+    let which = dir.path().join("which-java.txt");
+    let pathbin = dir.path().join("pathbin");
+    fs::create_dir_all(&pathbin).unwrap();
+    write_recording_java(&pathbin.join("java"), "path", &which);
+    let override_dir = dir.path().join("jvm8");
+    fs::create_dir_all(&override_dir).unwrap();
+    let override_java = override_dir.join("java");
+    write_recording_java(&override_java, "override", &which);
+
+    let path = format!(
+        "{}:{}",
+        pathbin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new(&out)
+        .env("PATH", &path)
+        .env("MAGICJAR_JAVA", &override_java)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the .jar-named magicked file should run");
+    assert_eq!(
+        fs::read_to_string(&which).unwrap().trim(),
+        "override",
+        "the .jar fast-path must honor $MAGICJAR_JAVA"
+    );
+}

@@ -55,6 +55,9 @@ if [ -z "${_JAVA_OPTIONS}" ] && [ -z "${JAVA_OPTS}" ] && [ "$USER_SET_MEM" -eq 0
 fi
 
 @MALLOC_BLOCK@
+# The JVM to launch is $MAGICJAR_JAVA when set (e.g. to pin a specific Java for
+# a tool that requires one), otherwise plain `java` from PATH.
+#
 # If invoked under a name ending in .jar, hand the JVM this file directly.
 # Otherwise expose a .jar-named handle first: some tools (e.g. GATK) discover
 # classes via libraries that only scan classpath entries ending in .jar, so a
@@ -62,7 +65,7 @@ fi
 # to a copy when the temporary directory is on another filesystem.
 case "$0" in
   *.jar)
-    exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0" "${PASS_ARGS[@]}"
+    exec "${MAGICJAR_JAVA:-java}" $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0" "${PASS_ARGS[@]}"
     ;;
 esac
 MAGICJAR_TMPDIR="$(mktemp -d)"
@@ -77,7 +80,7 @@ if [ -L "$0" ]; then
 else
   ln "$0" "$MAGICJAR_JAR" 2>/dev/null || cp "$0" "$MAGICJAR_JAR"
 fi
-java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$MAGICJAR_JAR" "${PASS_ARGS[@]}"
+"${MAGICJAR_JAVA:-java}" $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$MAGICJAR_JAR" "${PASS_ARGS[@]}"
 exit
 "#;
 
@@ -846,13 +849,31 @@ mod tests {
     fn preamble_exposes_a_jar_named_handle_for_bare_names() {
         let preamble = build_preamble(&PreambleOptions::default()).unwrap();
         // Fast path: a name already ending in .jar execs the JVM directly.
-        assert!(preamble.contains(r#"exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0""#));
+        assert!(
+            preamble
+                .contains(r#"exec "${MAGICJAR_JAVA:-java}" $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0""#)
+        );
         // Bare names get a .jar-suffixed handle (hardlink, else copy) first, so
         // reflections-based tools (e.g. GATK) can recognize the classpath entry.
         assert!(preamble.contains("mktemp -d"));
         assert!(preamble.contains(r#"$(basename "$0").jar"#));
         assert!(preamble.contains(r#"ln "$0" "$MAGICJAR_JAR""#));
         assert!(preamble.contains(r#"cp "$0" "$MAGICJAR_JAR""#));
+    }
+
+    #[test]
+    fn preamble_launches_via_magicjar_java_override() {
+        let preamble = build_preamble(&PreambleOptions::default()).unwrap();
+        // Both JVM launch sites (the .jar fast-path and the bare-name path) go
+        // through $MAGICJAR_JAVA, which defaults to `java` when unset.
+        assert_eq!(
+            preamble.matches(r#""${MAGICJAR_JAVA:-java}""#).count(),
+            2,
+            "both launch sites must honor the MAGICJAR_JAVA override"
+        );
+        // The old unconditional `java` launch form must be gone from both sites.
+        assert!(!preamble.contains(r#"exec java $JAVA_OPTS"#));
+        assert!(!preamble.contains("\njava $JAVA_OPTS"));
     }
 
     #[test]
