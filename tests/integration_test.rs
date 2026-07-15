@@ -344,6 +344,108 @@ fn routes_jvm_flags_and_passes_program_args() {
 }
 
 #[test]
+fn bare_named_file_hands_the_jvm_a_dot_jar_path() {
+    // A reflections-based tool (e.g. GATK) only scans classpath entries whose
+    // name ends in .jar. Prove that an extensionless magicked file still hands
+    // the JVM a .jar-suffixed path. A fake `java` records its argv, so this needs
+    // neither a real JVM nor a classpath-scanning jar.
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let out = dir.path().join("mytool"); // no .jar suffix
+    magicjar().arg(&jar).arg(&out).assert().success();
+
+    let bindir = dir.path().join("fakebin");
+    fs::create_dir_all(&bindir).unwrap();
+    let args_file = dir.path().join("java-args.txt");
+    let fake_java = bindir.join("java");
+    fs::write(
+        &fake_java,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {}\n",
+            shell_quote(args_file.to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    make_executable(&fake_java);
+
+    let path = format!(
+        "{}:{}",
+        bindir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new(&out).env("PATH", &path).status().unwrap();
+    assert!(
+        status.success(),
+        "the extensionless magicked file should run"
+    );
+
+    let recorded = fs::read_to_string(&args_file).unwrap();
+    let args: Vec<&str> = recorded.lines().collect();
+    let jar_pos = args
+        .iter()
+        .position(|a| *a == "-jar")
+        .expect("the preamble must invoke `java -jar`");
+    let jar_arg = args.get(jar_pos + 1).expect("`-jar` needs a path");
+    assert!(
+        jar_arg.ends_with(".jar"),
+        "the classpath entry handed to the JVM must end in .jar; got {jar_arg}"
+    );
+    assert_eq!(
+        Path::new(jar_arg).file_name().and_then(|n| n.to_str()),
+        Some("mytool.jar"),
+        "the .jar handle should derive from the tool basename; got {jar_arg}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn symlink_staged_file_hands_the_jvm_a_real_jar_not_a_symlink() {
+    // A workflow engine (e.g. nextflow) stages an input as a symlink in the task
+    // dir. The preamble must hand the JVM a *real* .jar file, not a hardlink to
+    // the symlink that canonicalizes back to the bare-named target (which would
+    // defeat reflections-based tools like GATK). The fake `java` reports whether
+    // its .jar argument is a symlink.
+    let dir = tempfile::tempdir().unwrap();
+    let jar = dir.path().join("app.jar");
+    fs::copy(hello_jar(), &jar).unwrap();
+    let real = dir.path().join("mytool"); // extensionless real magicked file
+    magicjar().arg(&jar).arg(&real).assert().success();
+
+    let taskdir = dir.path().join("task");
+    fs::create_dir_all(&taskdir).unwrap();
+    let staged = taskdir.join("mytool"); // bare-named symlink, like nextflow
+    std::os::unix::fs::symlink(&real, &staged).unwrap();
+
+    let bindir = dir.path().join("fakebin");
+    fs::create_dir_all(&bindir).unwrap();
+    let kind_file = dir.path().join("jar-kind.txt");
+    let fake_java = bindir.join("java");
+    fs::write(
+        &fake_java,
+        format!(
+            "#!/usr/bin/env bash\nfor a in \"$@\"; do case \"$a\" in *.jar) if [ -L \"$a\" ]; then echo symlink > {k}; else echo real > {k}; fi;; esac; done\n",
+            k = shell_quote(kind_file.to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    make_executable(&fake_java);
+
+    let path = format!(
+        "{}:{}",
+        bindir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new(&staged).env("PATH", &path).status().unwrap();
+    assert!(status.success(), "the symlink-staged file should run");
+    assert_eq!(
+        fs::read_to_string(&kind_file).unwrap().trim(),
+        "real",
+        "the JVM must get a real .jar, not a symlink that resolves back to a bare name"
+    );
+}
+
+#[test]
 fn resolves_shell_wrapper_using_prefix_variable() {
     // A non-Python (shell) wrapper that references the jar via $PREFIX, the way
     // many conda shell shims do. Layout: <prefix>/bin/toolwrap + <prefix>/lib/tool.jar.

@@ -55,7 +55,29 @@ if [ -z "${_JAVA_OPTIONS}" ] && [ -z "${JAVA_OPTS}" ] && [ "$USER_SET_MEM" -eq 0
 fi
 
 @MALLOC_BLOCK@
-exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0" "${PASS_ARGS[@]}"
+# If invoked under a name ending in .jar, hand the JVM this file directly.
+# Otherwise expose a .jar-named handle first: some tools (e.g. GATK) discover
+# classes via libraries that only scan classpath entries ending in .jar, so a
+# bare name (./tool) would make them find nothing. Prefer a hardlink; fall back
+# to a copy when the temporary directory is on another filesystem.
+case "$0" in
+  *.jar)
+    exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0" "${PASS_ARGS[@]}"
+    ;;
+esac
+MAGICJAR_TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$MAGICJAR_TMPDIR"' EXIT
+MAGICJAR_JAR="$MAGICJAR_TMPDIR/$(basename "$0").jar"
+# Materialize a real .jar-named file. When invoked through a symlink (e.g. a
+# workflow engine staging this file into a task dir), copy so we dereference to
+# a real .jar the JVM sees as .jar; a hardlink would just relink the symlink and
+# resolve back to its bare-named target. For a real file, a hardlink is cheap.
+if [ -L "$0" ]; then
+  cp "$0" "$MAGICJAR_JAR"
+else
+  ln "$0" "$MAGICJAR_JAR" 2>/dev/null || cp "$0" "$MAGICJAR_JAR"
+fi
+java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$MAGICJAR_JAR" "${PASS_ARGS[@]}"
 exit
 "#;
 
@@ -818,6 +840,19 @@ mod tests {
         assert!(preamble.contains("-Xms1g"));
         assert!(preamble.contains("-XX:+UseZGC"));
         assert!(!preamble.contains("-Xms512m"));
+    }
+
+    #[test]
+    fn preamble_exposes_a_jar_named_handle_for_bare_names() {
+        let preamble = build_preamble(&PreambleOptions::default()).unwrap();
+        // Fast path: a name already ending in .jar execs the JVM directly.
+        assert!(preamble.contains(r#"exec java $JAVA_OPTS "${JVM_OPTS[@]}" -jar "$0""#));
+        // Bare names get a .jar-suffixed handle (hardlink, else copy) first, so
+        // reflections-based tools (e.g. GATK) can recognize the classpath entry.
+        assert!(preamble.contains("mktemp -d"));
+        assert!(preamble.contains(r#"$(basename "$0").jar"#));
+        assert!(preamble.contains(r#"ln "$0" "$MAGICJAR_JAR""#));
+        assert!(preamble.contains(r#"cp "$0" "$MAGICJAR_JAR""#));
     }
 
     #[test]
