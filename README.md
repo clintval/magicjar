@@ -53,12 +53,24 @@ JVM flags pass straight through to the JVM; everything else goes to the program:
 ❯ ./fgbio -Xmx8g -XX:+UseZGC -Dconfig=prod CallMolecularConsensusReads -i "in.bam"
 ```
 
+## Selecting the JVM
+
+By default the wrapper launches `java` from `PATH`. Set `MAGICJAR_JAVA` to pin a
+specific JVM for a single invocation, useful when one tool needs a different
+Java than the rest of the environment (e.g. a legacy tool that requires Java 8):
+
+```bash
+❯ MAGICJAR_JAVA=/opt/java8/bin/java ./gatk3 -T DepthOfCoverage …
+```
+
+Leave it unset and nothing changes: the wrapper uses `java` as before.
+
 ## Use in a Dockerfile
 
 Copy the binary out of the published image:
 
 ```dockerfile
-COPY --from=ghcr.io/clintval/magicjar:0.1.0 /magicjar /usr/local/bin/magicjar
+COPY --from=ghcr.io/clintval/magicjar:0.3.0 /magicjar /usr/local/bin/magicjar
 ```
 
 Or fetch the binary straight from the GitHub Release (swap the target for
@@ -66,7 +78,7 @@ Or fetch the binary straight from the GitHub Release (swap the target for
 
 ```dockerfile
 ADD --chmod=755 \
-    https://github.com/clintval/magicjar/releases/download/0.1.0/magicjar-x86_64-unknown-linux-musl \
+    https://github.com/clintval/magicjar/releases/download/0.3.0/magicjar-x86_64-unknown-linux-musl \
     /usr/local/bin/magicjar
 ```
 
